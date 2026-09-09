@@ -1,0 +1,10 @@
+From: noreply@example.com
+To: user@example.com
+Subject: 账户通知
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><body>
+<p style="font-family: Arial; font-size: 14px; color: #333333; text-align: left;">尊敬的客户：</p>
+<p style="font-family: 'Microsoft YaHei'; font-size: 16px; color: #FF0000; text-align: center;">这是第二段正文。</p>
+</body></html>

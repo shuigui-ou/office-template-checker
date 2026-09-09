@@ -1,0 +1,237 @@
+{
+  "schema": "office-checker-paramtree/1.0",
+  "description": "Office 模板一致性校验默认参数树。维度(D1-D6)→参数→小参数 逐层下钻；每个叶子挂一种匹配模式。小参数键用 element/attr 斜杠形式（如 sz/val），引擎据此查表；路径含位置索引保证同参数不同位置是不同 key、永不合并。",
+  "template_version": "",
+
+  "dimensions": {
+    "D1_theme_style": {
+      "label": "主题与样式层",
+      "enabled": true,
+      "params": {
+        "theme_fonts": {
+          "label": "主题字体",
+          "enabled": true,
+          "subparams": {
+            "a:latin/typeface": {"match": "exact"},
+            "a:ea/typeface": {"match": "exact"},
+            "a:cs/typeface": {"match": "exact"}
+          }
+        },
+        "theme_colors": {
+          "label": "主题色板",
+          "enabled": true,
+          "subparams": {
+            "a:schemeClr/val": {"match": "theme_slot"},
+            "a:srgbClr/val": {"match": "rgb"}
+          }
+        }
+      }
+    },
+
+    "D2_page_canvas": {
+      "label": "页面与画布层",
+      "enabled": true,
+      "params": {
+        "margins": {
+          "label": "页边距",
+          "enabled": true,
+          "subparams": {
+            "pgMar/top": {"match": "tolerance", "tol": 5, "unit": "twip"},
+            "pgMar/bottom": {"match": "tolerance", "tol": 5, "unit": "twip"},
+            "pgMar/left": {"match": "tolerance", "tol": 5, "unit": "twip"},
+            "pgMar/right": {"match": "tolerance", "tol": 5, "unit": "twip"}
+          }
+        },
+        "page_size": {
+          "label": "纸张大小",
+          "enabled": true,
+          "subparams": {
+            "pgSz/w": {"match": "exact"},
+            "pgSz/h": {"match": "exact"},
+            "pgSz/orient": {"match": "exact"}
+          }
+        }
+      }
+    },
+
+    "D3_block": {
+      "label": "块级层",
+      "enabled": true,
+      "params": {
+        "paragraph_align": {
+          "label": "段落对齐与缩进",
+          "enabled": true,
+          "subparams": {
+            "jc/val": {"match": "exact"},
+            "ind/left": {"match": "tolerance", "tol": 10, "unit": "twip"},
+            "ind/right": {"match": "tolerance", "tol": 10, "unit": "twip"},
+            "ind/firstLine": {"match": "tolerance", "tol": 10, "unit": "twip"},
+            "spacing/line": {"match": "exact"},
+            "spacing/lineRule": {"match": "exact"},
+            "spacing/before": {"match": "tolerance", "tol": 10, "unit": "twip"},
+            "spacing/after": {"match": "tolerance", "tol": 10, "unit": "twip"}
+          }
+        },
+        "cell_format": {
+          "label": "单元格格式",
+          "enabled": true,
+          "subparams": {
+            "alignment/horizontal": {"match": "exact"},
+            "alignment/vertical": {"match": "exact"}
+          }
+        }
+      }
+    },
+
+    "D4_character": {
+      "label": "字符层 Run",
+      "enabled": true,
+      "params": {
+        "font": {
+          "label": "字体",
+          "enabled": true,
+          "subparams": {
+            "rFonts/eastAsia": {"match": "exact"},
+            "rFonts/ascii": {"match": "exact"},
+            "rFonts/hAnsi": {"match": "exact"},
+            "rFonts/cs": {"match": "exact"}
+          }
+        },
+        "size": {
+          "label": "字号",
+          "enabled": true,
+          "subparams": {
+            "sz/val": {"match": "tolerance", "tol": 1, "unit": "half_pt"}
+          }
+        },
+        "color": {
+          "label": "颜色",
+          "enabled": true,
+          "subparams": {
+            "color/val": {"match": "rgb"},
+            "color/themeColor": {"match": "theme_slot"},
+            "color/themeTint": {"match": "theme_slot"}
+          }
+        },
+        "spacing_kerning": {
+          "label": "字距/缩放",
+          "enabled": true,
+          "subparams": {
+            "spacing/val": {"match": "tolerance", "tol": 2, "unit": "pt_20th"},
+            "w/val": {"match": "tolerance", "tol": 1, "unit": "pct"}
+          }
+        },
+        "emphasis": {
+          "label": "字形",
+          "enabled": true,
+          "subparams": {
+            "b/val": {"match": "exact"},
+            "i/val": {"match": "exact"},
+            "u/val": {"match": "exact"},
+            "highlight/val": {"match": "rgb"},
+            "shd/fill": {"match": "rgb"}
+          }
+        }
+      }
+    },
+
+    "D5_graphic": {
+      "label": "图形与效果层",
+      "enabled": true,
+      "params": {
+        "fill": {
+          "label": "填充",
+          "enabled": true,
+          "subparams": {
+            "srgbClr/val": {"match": "rgb"},
+            "schemeClr/val": {"match": "theme_slot"}
+          }
+        },
+        "line": {
+          "label": "线条",
+          "enabled": true,
+          "subparams": {
+            "ln/w": {"match": "tolerance", "tol": 6350, "unit": "emu"},
+            "ln/cap": {"match": "exact"},
+            "ln/cmpd": {"match": "exact"}
+          }
+        },
+        "xfrm": {
+          "label": "位置与大小",
+          "enabled": true,
+          "subparams": {
+            "off/x": {"match": "tolerance", "tol": 9144, "unit": "emu"},
+            "off/y": {"match": "tolerance", "tol": 9144, "unit": "emu"},
+            "ext/cx": {"match": "tolerance", "tol": 9144, "unit": "emu"},
+            "ext/cy": {"match": "tolerance", "tol": 9144, "unit": "emu"},
+            "xfrm/rot": {"match": "tolerance", "tol": 1000, "unit": "emu"}
+          }
+        }
+      }
+    },
+
+    "D6_dynamic_meta": {
+      "label": "动态与元数据层",
+      "enabled": true,
+      "params": {
+        "numbers": {
+          "label": "数字格式",
+          "enabled": true,
+          "subparams": {
+            "numFmt/formatCode": {"match": "exact"},
+            "numFmt/numFmtId": {"match": "exact"}
+          }
+        }
+      }
+    },
+
+    "D7_email": {
+      "label": "邮件格式层",
+      "enabled": true,
+      "params": {
+        "headers": {
+          "label": "邮件头",
+          "enabled": true,
+          "subparams": {
+            "content-type/mime": {"match": "exact"},
+            "content-type/charset": {"match": "exact"}
+          }
+        },
+        "inline_style": {
+          "label": "HTML 内联样式",
+          "enabled": true,
+          "subparams": {
+            "style/font-family": {"match": "exact"},
+            "style/font-size": {"match": "tolerance", "tol": 1, "unit": "px"},
+            "style/color": {"match": "rgb"},
+            "style/text-align": {"match": "exact"},
+            "style/line-height": {"match": "tolerance", "tol": 0.1, "unit": "ratio"},
+            "style/font-weight": {"match": "exact"}
+          }
+        }
+      }
+    }
+  },
+
+  "ignore_attr_patterns": [
+    "rsid*",
+    "Ignorable",
+    "docId",
+    "#text"
+  ],
+
+  "theme_slot_attrs": ["themeColor", "themeTint", "schemeClr"],
+
+  "tolerances": {
+    "pt": 0.5,
+    "twip": 5,
+    "emu": 9144,
+    "pt_20th": 2,
+    "pct": 1,
+    "default": 0
+  },
+
+  "path_overrides": [
+    {"path_regex": ".*/(docPr|nvSpPr)\\[\\d+\\]/.*", "match": "ignore"}
+  ]
+}

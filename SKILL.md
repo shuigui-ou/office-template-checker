@@ -1,6 +1,17 @@
 ---
 name: office-template-checker
+slug: office-template-checker
+displayName: Office 模板一致性校验器
+version: 1.0.0
 description: 对照模板（docx/xlsx/pptx/eml 成品）校验派生文件格式一致性，输出精确到位置的偏差报告。当用户给出模板和若干派生文件、要核对"有没有偏离模板"（字体/字号/颜色/字距/边距/对齐/位置大小/数字格式/邮件 HTML 内联样式等）时使用。基于全量属性对称 diff，参数树可自定义、可按维度-参数-小参数逐层下钻；已内置邮件(.eml)适配器。
+summary: 对照模板校验 docx/xlsx/pptx/eml 派生文件格式一致性，输出精确到位置的偏差报告。
+license: MIT
+tags:
+  - 文档处理
+  - 格式校验
+  - 办公自动化
+  - 模板比对
+  - 邮件
 ---
 
 # Office / 邮件 模板一致性校验器

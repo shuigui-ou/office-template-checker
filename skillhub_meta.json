@@ -1,0 +1,22 @@
+{
+  "display_name": "Office 模板一致性校验器",
+  "slug": "office-template-checker",
+  "version": "1.0.0",
+  "category": "文档处理",
+  "tags": [
+    "office",
+    "docx",
+    "xlsx",
+    "pptx",
+    "eml",
+    "格式校验",
+    "模板一致性",
+    "文档比对",
+    "邮件"
+  ],
+  "short_description": "对照 Word/Excel/PPT/邮件(.eml) 模板校验派生文件格式一致性，全量属性对称 diff + 可自定义参数树，精确到位置输出偏差报告。",
+  "long_description": "本技能对照一份模板（Word / Excel / PowerPoint / 邮件 .eml 成品）校验若干派生文件的格式是否一致，输出精确到「第几段第几个 run」的偏差报告。\n\n核心做法不是拿一份固定清单去比对，而是把模板与派生文件各自的每一个声明式属性（Office 的 XML 属性、邮件的 header 与 HTML 内联样式）全量抽取后做对称 diff——任何一边有、另一边没有的属性都会自动暴露，因此「参数不全」在底层物理上不可能发生。\n\n· 位置索引比较 key：`p[1]/r[1]/rPr[1]/sz[1]` 与 `p[2]/.../sz[1]` 是两条独立 key，同参数不同位置永不合并（句1 的 A 与句C 的 A 算两个）。\n· 参数树（维度→参数→小参数）作过滤器：5 种匹配模式——精确 / 解算RGB / 按主题槽 / 容差±ε / 忽略。\n· 真缺口标红（❌）：volatile 函数、外部引用、缓存域、未替换占位符 {{}} 在报告中单列，需人工复核。\n· 适配器架构：docx/xlsx/pptx/eml 已实现；新格式只需实现 FormatAdapter 子类并注册，引擎零改动。\n\n仅用 Python 标准库，零第三方依赖。",
+  "icon": "office-template-checker-icon.png （单独上传，不进 zip）",
+  "package": "office-template-checker.zip （无图片，手动上传）",
+  "repo_url": "https://github.com/shuigui-ou/office-template-checker"
+}

@@ -54,6 +54,10 @@ python checker.py --template template.docx --derived-dir ./deriveds/ \
 运行目录请 `cd` 到本 Skill 目录（含 checker.py / office_adapter.py / email_adapter.py /
 adapter_interface.py / param_tree.json）。
 
+> 本包不含二进制样例。需生成演示用 `.docx` 样例，运行：
+> `python build_sample.py`（产出 template.docx / derived.docx，用于验证引擎）。
+> `.eml` 样例已随包附带（template.eml / derived.eml，纯文本可直接查看）。
+
 ## 输出
 
 - `report.md`：按维度分组的偏差表（类型 / 位置 / 属性 / 模板值 / 派生值 / 层 / 模式）+ ❌ 人工复核清单。

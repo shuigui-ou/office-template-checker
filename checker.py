@@ -45,7 +45,7 @@ ELEMENT_DIM = {
 
 # ❌ 真缺口：volatile / 外部引用 / 缓存域 / 未替换占位符 需人工复核
 VOLATILE_RE = re.compile(r"\b(TODAY|NOW|RAND|OFFSET|INDIRECT)\b", re.I)
-EXTERNAL_RE = re.compile(r"\[[^\]]+\]!")
+EXTERNAL_RE = re.compile(r"\[[^\]]+\][^!]*!")
 FIELDCACHE_RE = re.compile(r"\b(TOC|REF|INDEX|SEQ|STYLEREF)\b", re.I)
 PLACEHOLDER_RE = re.compile(r"\{\{[^}]+\}\}")
 

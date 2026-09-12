@@ -23,6 +23,8 @@ import json
 import os
 import re
 import sys
+import tempfile
+import zipfile
 
 from adapter_interface import AdapterRegistry, Prop
 import office_adapter  # 注册 OfficeAdapter
@@ -48,6 +50,64 @@ VOLATILE_RE = re.compile(r"\b(TODAY|NOW|RAND|OFFSET|INDIRECT)\b", re.I)
 EXTERNAL_RE = re.compile(r"\[[^\]]+\][^!]*!")
 FIELDCACHE_RE = re.compile(r"\b(TOC|REF|INDEX|SEQ|STYLEREF)\b", re.I)
 PLACEHOLDER_RE = re.compile(r"\{\{[^}]+\}\}")
+
+
+class CheckError(Exception):
+    """对用户友好的错误：直接显示中文原因与修复建议，不抛栈。"""
+
+
+def _fail(msg: str) -> None:
+    print("✗ " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def safe_extract(path: str, cfg=None):
+    """带中文错误提示的抽取入口，统一兜底所有解析异常。
+
+    返回 (adapter, props)；任何失败都以 CheckError 抛出可读中文信息，
+    不让用户面对英文栈或闪退。
+    """
+    if not os.path.exists(path):
+        raise CheckError(
+            f"找不到文件：{path}\n"
+            f"  请检查路径与文件名是否正确（中文路径需确保终端编码为 UTF-8）。")
+    ext = os.path.splitext(path)[1].lower()
+    office_ext = (".docx", ".xlsx", ".pptx", ".dotx", ".xltx", ".potx")
+    if ext not in office_ext and ext != ".eml":
+        raise CheckError(
+            f"不支持的文件格式：{path}\n"
+            f"  仅支持 .docx / .xlsx / .pptx / .eml。\n"
+            f"  说明：.msg（Outlook）暂不支持，请先另存为 .eml；PDF 扫描件不支持。")
+    # 扩展名合法，但适配器可能因文件损坏而拒绝 → 区分"损坏"与"不支持"
+    try:
+        adapter = AdapterRegistry.for_file(path)
+    except ValueError:
+        if ext in office_ext:
+            raise CheckError(
+                f"文件已损坏或不是有效的 Office 文档：{path}\n"
+                f"  扩展名虽为 Office，但内部不是合法的 zip 包——可能被改名，"
+                f"或实际是 PDF / 图片 / 加密文件。\n"
+                f"  建议：用原生 Office 重新另存为 .docx / .xlsx / .pptx。")
+        raise CheckError(
+            f"不支持的文件格式：{path}\n"
+            f"  仅支持 .docx / .xlsx / .pptx / .eml。")
+    try:
+        props = adapter.extract(path)
+    except zipfile.BadZipFile:
+        raise CheckError(
+            f"文件已损坏或不是有效的 Office 文档：{path}\n"
+            f"  扩展名虽为 Office，但内部不是合法的 zip 包——可能被改名，"
+            f"或实际是 PDF / 图片 / 加密文件。\n"
+            f"  建议：用原生 Office 重新另存为 .docx / .xlsx / .pptx。")
+    except FileNotFoundError:
+        raise CheckError(f"找不到文件：{path}")
+    except Exception as e:
+        raise CheckError(
+            f"解析文件时出错：{path}\n"
+            f"  原因：{e}\n"
+            f"  建议：确认文件未损坏且为 Office 原生格式"
+            f"（加密文档、PDF 扫描件、图片均不支持）。")
+    return adapter, props
 
 
 class ParamTree:
@@ -155,8 +215,7 @@ def fingerprint(path: str) -> str:
 
 
 def build_baseline(template_path, cfg, out_path):
-    adapter = AdapterRegistry.for_file(template_path)
-    props = adapter.extract(template_path)
+    adapter, props = safe_extract(template_path, cfg)
     theme = adapter.theme_map(template_path)
     baseline = {
         "template": os.path.abspath(template_path),
@@ -192,10 +251,8 @@ def scan_red_flags(props):
 
 
 def compare(template_path, derived_path, cfg, pt: ParamTree):
-    adapter_t = AdapterRegistry.for_file(template_path)
-    adapter_d = AdapterRegistry.for_file(derived_path)
-    props_t = adapter_t.extract(template_path)
-    props_d = adapter_d.extract(derived_path)
+    adapter_t, props_t = safe_extract(template_path, cfg)
+    adapter_d, props_d = safe_extract(derived_path, cfg)
     theme_t = adapter_t.theme_map(template_path)
     theme_d = adapter_d.theme_map(derived_path)
     mt, md = build_map(props_t), build_map(props_d)
@@ -287,10 +344,23 @@ def main():
     ap.add_argument("--config", default="param_tree.json")
     ap.add_argument("--json", help="额外输出结构化 JSON 路径")
     ap.add_argument("--out-dir", help="批量报告输出目录")
+    ap.add_argument("--demo", action="store_true",
+                   help="运行内置演示：自动生成模板/派生样例并比对，展示标准报告长什么样")
     args = ap.parse_args()
 
-    with open(args.config, encoding="utf-8") as f:
-        cfg = json.load(f)
+    if args.demo:
+        run_demo()
+        return
+
+    try:
+        with open(args.config, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except FileNotFoundError:
+        _fail(f"找不到参数树配置文件：{args.config}\n"
+              f"  请确认 --config 指向正确的 param_tree.json"
+              f"（默认即本目录下的 param_tree.json）。")
+    except json.JSONDecodeError as e:
+        _fail(f"参数树配置文件不是合法 JSON：{args.config}\n  原因：{e}")
     pt = ParamTree(cfg)
 
     if args.baseline:
@@ -333,5 +403,71 @@ def main():
         print(f"[batch] {len(summary)} files -> {out_dir}")
 
 
+# ---------- 内置演示 ----------
+def _write_demo_docx(name: str, paras):
+    """生成最小可用 .docx 演示文件（仅标准库，无第三方依赖）。"""
+    CT = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+          '<Default Extension="xml" ContentType="application/xml"/>'
+          '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+          '</Types>')
+    RELS = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            '</Relationships>')
+    body = ""
+    for sz, text in paras:
+        body += (f'    <w:p><w:r><w:rPr><w:sz w:val="{sz}"/></w:rPr>'
+                 f'<w:t>{text}</w:t></w:r></w:p>')
+    document = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                '<w:body>' + body + '</w:body></w:document>')
+    with zipfile.ZipFile(name, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", CT)
+        z.writestr("_rels/.rels", RELS)
+        z.writestr("word/document.xml", document)
+
+
+def run_demo():
+    """一键演示：生成模板/派生样例 -> 比对 -> 打印标准偏差报告。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    cfg_path = os.path.join(here, "param_tree.json")
+    if not os.path.exists(cfg_path):
+        _fail(f"演示需要同目录的 param_tree.json，但未找到：{cfg_path}")
+    tmp = tempfile.mkdtemp(prefix="otc_demo_")
+    tpl = os.path.join(tmp, "template.docx")
+    drv = os.path.join(tmp, "derived.docx")
+    # 模板：两段都是模板样式；派生：仅第2段字号被改（模拟"偏离模板"）
+    _write_demo_docx(tpl, [(36, "句一：模板标题（与派生一致）"),
+                           (24, "句C：模板正文（字号 24）")])
+    _write_demo_docx(drv, [(36, "句一：模板标题（与派生一致）"),
+                           (40, "句C：派生被改成 40 磅（偏离！）")])
+    cfg = json.load(open(cfg_path, encoding="utf-8"))
+    pt = ParamTree(cfg)
+    devs, red = compare(tpl, drv, cfg, pt)
+    md = render_report(tpl, drv, devs, red, pt)
+    out = os.path.join(tmp, "demo_report.md")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(md)
+    print("=" * 64)
+    print("演示：模板第2段字号=24，派生被改为=40，其余完全一致")
+    print("=" * 64)
+    print(md)
+    print(f"\n✓ 演示完成。这就是一份标准『模板一致性偏差报告』。")
+    print(f"  报告已写入：{out}")
+    print(f"  想用你自己的文件？照『运行方式』里的命令替换 --template/--derived 即可。")
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except CheckError as e:
+        print("✗ " + str(e), file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:
+        print("✗ 未预期错误：" + str(e), file=sys.stderr)
+        print("  如能稳定复现，请把文件与命令发给我以便修复。", file=sys.stderr)
+        sys.exit(2)

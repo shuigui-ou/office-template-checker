@@ -47,21 +47,33 @@ class OfficeAdapter(FormatAdapter):
                 self._walk(root, [], 1, props, n)
         return props
 
-    def _walk(self, el, pathlst, idx, props, part):
+    def _walk(self, el, pathlst, idx, props, part, para=None):
         tag = _ln(el.tag)
         p = pathlst + [f"{tag}[{idx}]"]
+        if tag == "p":
+            # 进入段落：开启内容锚点上下文（用于相对位置对齐，不参与格式比较）
+            para = {"path": "/".join(p), "text": []}
         for k, v in el.attrib.items():
             props.append(Prop(part=part, path="/".join(p),
                               element=tag, attr=_ln(k), value=v))
-        # 仅对白名单元素捕获文本（公式 / 域代码），用于 ❌ 标红
+        # 白名单元素（公式 / 域代码）文本仍按 #text 捕获，供 ❌ 标红
         if tag in TEXT_CAPTURE and el.text and el.text.strip():
             props.append(Prop(part=part, path="/".join(p),
                               element=tag, attr="#text", value=el.text.strip()))
+        # 普通文本：累积到最近段落上下文，作为对齐锚点（仅用于相对位置对齐）
+        if tag == "t" and el.text and el.text.strip() and para is not None:
+            para["text"].append(el.text.strip())
         child_idx = {}
         for c in el:
             ct = _ln(c.tag)
             child_idx[ct] = child_idx.get(ct, 0) + 1
-            self._walk(c, p, child_idx[ct], props, part)
+            self._walk(c, p, child_idx[ct], props, part, para)
+        # 段落结束时，把累积文本作为 #ctext 锚点挂到该段落节点（值稳定、用于对齐）
+        if tag == "p" and para is not None:
+            txt = "".join(para["text"])
+            if txt:
+                props.append(Prop(part=part, path="/".join(p),
+                                  element="p", attr="#ctext", value=txt))
 
     def anchors(self, path: str) -> list:
         """结构锚点：样式名(pStyle)、书签(bookmarkStart)、占位符({{...}})。"""

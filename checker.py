@@ -201,9 +201,250 @@ def values_match(mode, spec, tv, dv, t_theme, d_theme):
     return str(tv) == str(dv)
 
 
-# ---------- 核心比对 ----------
-def build_map(props):
-    return {(p.part, p.path, p.element, p.attr): p.value for p in props}
+# ---------- 相对位置对齐（核心：按结构相对位置比对，而非绝对索引） ----------
+# 为什么不用绝对索引：绝对索引在「模板某表插入一行/列」后会整体平移，
+# 导致后续所有行被误报为「新增/缺失」。相对位置 = 在同一父节点下，按子树特征
+# （shape + 内容锚点）做贪心一步前瞻/等数顺序配对找到的对应关系，插入的行列被
+# 识别为新增/缺失，其余项仍按对齐后的相对序号一一对应比较。这才是「相对位置
+# 是否有相同的格式」。
+_SEG = re.compile(r'([^/\[]+)(?:\[(\d+)\])?')
+
+
+def parse_segments(path):
+    return [(m.group(1), int(m.group(2)) if m.group(2) else None)
+            for m in _SEG.finditer(path)]
+
+
+_TAG_LABEL = {'w:body': '正文', 'w:tbl': '表', 'w:tr': '行', 'w:tc': '列',
+              'w:p': '段', 'w:r': '字', 'a:tbl': '表', 'a:tr': '行', 'a:tc': '列',
+              'a:p': '段', 'x:sheetData': '表', 'x:row': '行', 'x:c': '列'}
+
+
+def _label(tag, rank):
+    return '%s%d' % (_TAG_LABEL.get(tag, tag), rank)
+
+
+def _skip_label(tag):
+    # 部件名（word/document.xml 等）与 .rels 不作为定位标签，避免定位串冗余
+    return '/' in tag or tag.endswith('.xml') or tag.endswith('.rels')
+
+
+def build_tree(props):
+    """把 Prop 流建成嵌套树：每个节点的 attrs=该元素自身的格式属性，
+    children=按 (tag, 绝对索引) 排序的子节点；并自底向上计算局部内容锚点。"""
+    root = {'attrs': [], 'children': {}, '_idx': 0, '_tag': 'root'}
+    for p in props:
+        segs = parse_segments(p.path)
+        node = root
+        for (tag, idx) in segs:
+            node['children'].setdefault(tag, [])
+            child = None
+            for c in node['children'][tag]:
+                if c['_idx'] == idx:
+                    child = c
+                    break
+            if child is None:
+                child = {'attrs': [], 'children': {}, '_idx': idx, '_tag': tag}
+                node['children'][tag].append(child)
+            node = child
+        node['attrs'].append(p)
+    _calc_anchor(root, False)
+    return root
+
+
+def _calc_anchor(node, in_tbl=False):
+    """自底向上计算「局部内容锚点」：仅**表格内**的 w:p / w:tc / w:tr 携带文本锚点；
+    正文段落（非表格内）锚点强制清空，按 shape/顺序对齐（纯字号改动等仍能命中 changed）。
+
+    关键纪律：锚点只停在行/列这一层、**绝不上溢到文档/表层级**——
+    否则插入一行会让整篇或整表签名变化，再次级联误报。"""
+    for tag, kids in node['children'].items():
+        child_in_tbl = in_tbl or (tag == 'tbl')
+        for c in kids:
+            _calc_anchor(c, child_in_tbl)
+    tag = node.get('_tag')
+    if tag == 'p':
+        # 仅表格内的段落用文本做锚点；正文段落不锚定文本，避免文字改动破坏对齐
+        node['anchor'] = (''.join(p.value for p in node['attrs'] if p.attr == '#ctext')
+                          if in_tbl else '')
+    elif tag in ('tc', 'tr'):
+        node['anchor'] = ''.join(c.get('anchor', '')
+                               for _, kids in node['children'].items()
+                               for c in kids)
+    else:
+        node['anchor'] = ''
+
+
+def _collect(node, out):
+    out.extend(node['attrs'])
+    for tag, kids in node['children'].items():
+        for c in kids:
+            _collect(c, out)
+
+
+def shape_of(node):
+    """子树格式属性 shape：只看「哪些 (element, attr) 存在」，与取值、行数、内容文本都无关。
+    用于相对位置匹配——插入一行不会改变所在表/父节点的 shape。"""
+    acc = []
+    _collect(node, acc)
+    return frozenset((p.element, p.attr) for p in acc if p.attr != "#ctext")
+
+
+def node_sig(node):
+    """子树签名（兼容旧接口）：shape 加可选内容锚点。"""
+    s = shape_of(node)
+    a = node.get("anchor")
+    return s | frozenset([("#anchor", a)]) if a else s
+
+
+def greedy_align(t_kids, d_kids):
+    """相对位置对齐核心：按 (shape, 内容锚点) 做**贪心一步前瞻**匹配。
+
+    相比 LCS，本算法对「内容编辑/对调」免疫、对「插入/删除行列」不级联，正是用户工作流所需。
+
+    关键分派：
+    - **同层节点数相等** → 不存在结构性增删，所有差异只能是「内容编辑/对调」(0 偏差)
+      或「格式改动」(changed)。此时直接**按位置顺序配对**，不触发任何插入/删除逻辑。
+      这是修复「单元格内容对调被误报为删除+插入」的核心：等数时顺序配对，
+      内容不参与格式比较 → 0 偏差；而格式属性变动仍在逐属性比较中命中 changed。
+    - **节点数不等** → 必含真实增删，走一步前瞻定位多出的那一个：
+      若一步前瞻能解释对方为「插入」(派生多一个) 或「删除」(模板多一个)，
+      优先吸收该增删，不牵连后续；其余按对齐后的相对序号一一对应。
+
+    贪心保证：任何插入/删除最多错位一行/列即被前瞻吸收，**不会整片级联**。"""
+    n, m = len(t_kids), len(d_kids)
+    if n == m:
+        # 等数 → 顺序配对（内容编辑/对调/格式改动都在此分支处理，绝不变出增删）
+        return [("match", i, i) for i in range(n)]
+    def sp(n):
+        return (shape_of(n), n.get("anchor") or "")
+    pairs = []
+    i = j = 0
+    while i < n and j < m:
+        st, sa = sp(t_kids[i])
+        sd, da = sp(d_kids[j])
+        if st == sd and sa == da:
+            pairs.append(("match", i, j)); i += 1; j += 1
+        elif st == sd:
+            # 同结构、仅内容(文本)不同 → 先尝试用一步前瞻解释对方为插入/删除，
+            # 否则按「同一相对位置的纯内容编辑」匹配（内容不参与格式比较）。
+            if j + 1 < m and sp(d_kids[j + 1]) == (st, sa):
+                pairs.append(("add", -1, j)); j += 1        # 派生多一个 → 插入
+            elif i + 1 < n and sp(t_kids[i + 1]) == (sd, da):
+                pairs.append(("rem", i, -1)); i += 1        # 模板多一个 → 删除
+            else:
+                pairs.append(("match", i, j)); i += 1; j += 1
+        elif j + 1 < m and sp(d_kids[j + 1]) == (st, sa):
+            pairs.append(("add", -1, j)); j += 1            # 派生多一个 → 插入
+        elif i + 1 < n and sp(t_kids[i + 1]) == (sd, da):
+            pairs.append(("rem", i, -1)); i += 1            # 模板多一个 → 删除
+        else:
+            pairs.append(("rem", i, -1)); pairs.append(("add", -1, j)); i += 1; j += 1
+    while i < n:
+        pairs.append(("rem", i, -1)); i += 1
+    while j < m:
+        pairs.append(("add", -1, j)); j += 1
+    return pairs
+
+
+def _mk(part, loc, element, attr, mode, tv, dv, kind):
+    return {"dimension": dim_of(element), "layer": layer_of(part),
+            "part": part, "path": loc, "element": element, "attr": attr,
+            "mode": mode, "template": tv, "derived": dv, "kind": kind}
+
+
+def align_nodes(tn, dn, pt, theme_t, theme_d, rank_path, loc, deviations):
+    """递归对齐两个（已匹配的）节点：先比本节点属性，再按 tag 分组对子节点做贪心一步前瞻对齐。"""
+    t_map = {p.attr: p for p in tn['attrs']}
+    d_map = {p.attr: p for p in dn['attrs']}
+    for attr in set(t_map) | set(d_map):
+        if attr == "#ctext":
+            continue  # 内容锚点仅用于对齐，不参与格式比较
+        tp = t_map.get(attr)
+        dp = d_map.get(attr)
+        if tp and dp:
+            if pt._is_ignored_path(tp) or pt.is_noise(tp):
+                continue
+            mode, spec = pt.mode_for(tp)
+            if mode == 'ignore':
+                continue
+            if not values_match(mode, spec, tp.value, dp.value, theme_t, theme_d):
+                deviations.append(_mk(tp.part, loc, tp.element, attr, mode,
+                                      tp.value, dp.value, 'changed'))
+        elif tp is None:
+            if pt._is_ignored_path(dp) or pt.is_noise(dp):
+                continue
+            if pt.mode_for(dp)[0] == 'ignore':
+                continue
+            deviations.append(_mk(dp.part, loc, dp.element, attr, pt.mode_for(dp)[0],
+                                  None, dp.value, 'added'))
+        else:
+            if pt._is_ignored_path(tp) or pt.is_noise(tp):
+                continue
+            if pt.mode_for(tp)[0] == 'ignore':
+                continue
+            deviations.append(_mk(tp.part, loc, tp.element, attr, pt.mode_for(tp)[0],
+                                  tp.value, None, 'removed'))
+
+    for tag in set(tn['children']) | set(dn['children']):
+        t_kids = tn['children'].get(tag, [])
+        d_kids = dn['children'].get(tag, [])
+        pairs = greedy_align(t_kids, d_kids)
+        matched_t, matched_d = set(), set()
+        rank_of_t, rank_of_d, r = {}, {}, 0
+        for kind, a, b in pairs:
+            if kind == 'match':
+                matched_t.add(a); matched_d.add(b)
+                rank_of_t[a] = rank_of_d[b] = r
+                r += 1
+        for kind, a, b in pairs:
+            if kind == 'match':
+                continue
+            if kind == 'rem':
+                rank_of_t[a] = r; r += 1
+            else:
+                rank_of_d[b] = r; r += 1
+        for kind, a, b in pairs:
+            if kind != 'match':
+                continue
+            lab = '' if _skip_label(tag) else _label(tag, rank_of_t[a])
+            new_loc = (loc + lab) if (loc and lab) else (lab or loc)
+            align_nodes(t_kids[a], d_kids[b], pt, theme_t, theme_d,
+                        rank_path + [(tag, rank_of_t[a])], new_loc, deviations)
+        for kind, a, b in pairs:
+            if kind != 'rem':
+                continue
+            lab = '' if _skip_label(tag) else _label(tag, rank_of_t[a])
+            sub_loc = (loc + lab) if (loc and lab) else (lab or loc)
+            emit_subtree(t_kids[a], pt, sub_loc, 'removed', deviations)
+        for kind, a, b in pairs:
+            if kind != 'add':
+                continue
+            lab = '' if _skip_label(tag) else _label(tag, rank_of_d[b])
+            sub_loc = (loc + lab) if (loc and lab) else (lab or loc)
+            emit_subtree(d_kids[b], pt, sub_loc, 'added', deviations)
+
+
+def emit_subtree(node, pt, loc, kind, deviations):
+    """把未匹配子节点整棵子树作为 added/removed 偏差逐属性展开。"""
+    for p in node['attrs']:
+        if p.attr == "#ctext":
+            continue  # 内容锚点仅用于对齐，不参与格式比较
+        if pt._is_ignored_path(p) or pt.is_noise(p):
+            continue
+        if pt.mode_for(p)[0] == 'ignore':
+            continue
+        if kind == 'removed':
+            deviations.append(_mk(p.part, loc, p.element, p.attr, pt.mode_for(p)[0],
+                                  p.value, None, 'removed'))
+        else:
+            deviations.append(_mk(p.part, loc, p.element, p.attr, pt.mode_for(p)[0],
+                                  None, p.value, 'added'))
+    for tag, kids in node['children'].items():
+        for ci, c in enumerate(kids):
+            lab = '' if _skip_label(tag) else _label(tag, ci)
+            sub_loc = (loc + lab) if (loc and lab) else (lab or loc)
+            emit_subtree(c, pt, sub_loc, kind, deviations)
 
 
 def fingerprint(path: str) -> str:
@@ -251,50 +492,18 @@ def scan_red_flags(props):
 
 
 def compare(template_path, derived_path, cfg, pt: ParamTree):
+    """相对位置比对：先按结构树把模板/派生建成嵌套树，再逐层（正文/表/行/列）
+    用贪心一步前瞻按 (结构, 内容锚点) 对齐，插入的行列被识别为 added/removed，
+    其余按对齐后的相对序号一一对应比较。详见本文件顶部「相对位置对齐」段。"""
     adapter_t, props_t = safe_extract(template_path, cfg)
     adapter_d, props_d = safe_extract(derived_path, cfg)
     theme_t = adapter_t.theme_map(template_path)
     theme_d = adapter_d.theme_map(derived_path)
-    mt, md = build_map(props_t), build_map(props_d)
+    root_t, root_d = build_tree(props_t), build_tree(props_d)
 
     deviations = []
-    seen = set()
-    for key in sorted(set(mt) | set(md), key=lambda x: (x[0], x[1], x[2], x[3])):
-        part, path, element, attr = key
-        prop_t = Prop(part, path, element, attr, mt.get(key))
-        prop_d = Prop(part, path, element, attr, md.get(key))
-        # 噪声/忽略
-        if pt._is_ignored_path(prop_t) or pt._is_ignored_path(prop_d):
-            continue
-        if pt.is_noise(prop_t) or pt.is_noise(prop_d):
-            continue
-        tv, dv = mt.get(key), md.get(key)
-        if tv is not None and dv is not None:
-            mode, spec = pt.mode_for(prop_t)
-            ok = values_match(mode, spec, tv, dv, theme_t, theme_d)
-            if ok:
-                continue
-            kind = "changed"
-        elif tv is None:
-            mode, spec = pt.mode_for(prop_d)
-            if mode == "ignore":
-                continue
-            kind = "added"      # 模板没有、派生新增 → 偏离模板
-        else:
-            mode, spec = pt.mode_for(prop_t)
-            if mode == "ignore":
-                continue
-            kind = "removed"    # 模板有、派生缺失
-        deviations.append({
-            "dimension": dim_of(element),
-            "layer": layer_of(part),
-            "part": part, "path": path,
-            "element": element, "attr": attr,
-            "mode": mode,
-            "template": tv,
-            "derived": dv,
-            "kind": kind,
-        })
+    align_nodes(root_t, root_d, pt, theme_t, theme_d, [], '', deviations)
+
     red = scan_red_flags(props_t) + scan_red_flags(props_d)
     return deviations, red
 
@@ -328,9 +537,44 @@ def render_report(template_path, derived_path, deviations, red, pt: ParamTree):
         for r in red:
             lines.append(f"| {r['type']} | {r['loc'][:60]} | {r['detail']} |")
         lines.append("")
+    lines.append("## 偏差类型语义（如何解读本报告）")
+    lines.append("")
+    lines.append("你**基于模板手动编辑**（改内容 / 格式 / 内容逻辑）后另存为新文件，因此两类差异性质不同：")
+    lines.append("")
+    lines.append("- **格式偏离 `changed`**：同一**相对位置**上的格式属性值不同（字号、颜色、对齐、边距等）。这是审查重点——往往是编辑时不小心改坏了模板格式，或应当保持一致却漏改。")
+    lines.append("- **结构变动 `added`**：派生比模板多出的相对位置（如你插入了一行/列/段落）。属内容编辑的预期动作；本工具按相对位置对齐后**只把新增部分单列**，不会牵连后续行整片误报，请确认是否故意。")
+    lines.append("- **结构变动 `removed`**：派生比模板缺失的位置（如你删了一行/列）。可能是合理精简，也可能误删，需你确认。")
+    lines.append("")
+    lines.append("> 内容文本（你填的字）只用作「相对位置」对齐锚点，**不参与格式比较**——所以你改内容不会凭空产生「格式偏离」；只有格式属性本身被改才会记为 `changed`。")
+    lines.append("")
     lines.append("---")
-    lines.append("> 说明：比较 key 含位置索引，同参数不同位置互不合并；"
+    lines.append("> 核心保证（确定性，不调用任何大模型）：**按相对位置比对**——先按结构树逐层"
+                 "（正文 / 表 / 行 / 单元格）用贪心一步前瞻按 (结构, 内容锚点) 对齐，再比较「同一相对位置上的同一属性值"
+                 "是否相同」。模板某处插入一行/一列时，该新增行列被识别为 added/removed，"
+                 "其余行列仍按对齐后的相对序号一一对应，不会因绝对索引平移而整片误报。"
+                 "报告定位串（表N·行M·列K）中的序号即相对序号，非原始绝对索引。"
                  "报告仅含参数树未忽略的差异；渲染层/版本默认/隐式默认值不在范围内。")
+    lines.append("")
+    lines.append("## 引用安全声明（给大模型使用方 · 防止误引）")
+    lines.append("")
+    cb = (pt.cfg or {}).get("citation_boundary", {})
+    lines.append(cb.get("scope",
+        "**本工具是确定性引擎，不调用任何大模型；下列纪律用于约束引用方（agent），使其只能基于已锚定事实发言。**"))
+    lines.append("")
+    if cb.get("not_checked"):
+        lines.append("**本工具未查 / 查不了（引用方不得越界断言）：**")
+        for item in cb["not_checked"]:
+            lines.append("- %s" % item)
+        lines.append("")
+    lines.append("**引用纪律（四不准）：**")
+    discipline = cb.get("discipline") or [
+        "引用须带定位(path 或 part:path 片段)与维度标签，且限定在本报告已列出的偏差条目内。",
+        "不得对报告未列出的属性做一致/不一致断言；未列出 ≠ 一致。",
+        "带 ❌ 的偏差引用时须加「需人工复核」，不得直接判定合格。",
+        "不得编造报告中没有的页码、文件名或判定。",
+    ]
+    for item in discipline:
+        lines.append("- %s" % item)
     return "\n".join(lines)
 
 

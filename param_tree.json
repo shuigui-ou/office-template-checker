@@ -217,7 +217,10 @@
     "rsid*",
     "Ignorable",
     "docId",
-    "#text"
+    "#text",
+    "row/r",
+    "c/r",
+    "dimension/ref"
   ],
 
   "theme_slot_attrs": ["themeColor", "themeTint", "schemeClr"],

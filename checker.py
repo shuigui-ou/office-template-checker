@@ -231,10 +231,16 @@ def _skip_label(tag):
 
 def build_tree(props):
     """把 Prop 流建成嵌套树：每个节点的 attrs=该元素自身的格式属性，
-    children=按 (tag, 绝对索引) 排序的子节点；并自底向上计算局部内容锚点。"""
+    children=按 (tag, 绝对索引) 排序的子节点；并自底向上计算局部内容锚点。
+
+    关键：路径第一段必须是 **part（源文件名，如 xl/worksheets/sheet1.xml）**——
+    否则多个同构 part（如 sheet1.xml / sheet2.xml、slide1.xml / slide2.xml）内部都从
+    各自根元素（worksheet[1] / p:sld[1]）起步，在树里同名撞车被错误合并，导致多 sheet
+    / 多 slide 文件严重失真。加 part 前缀后各 part 天然分离（part 含 '/'，在定位串里
+    被 _skip_label 跳过，不污染定位文字，但保证不同 part 不互相配对）。"""
     root = {'attrs': [], 'children': {}, '_idx': 0, '_tag': 'root'}
     for p in props:
-        segs = parse_segments(p.path)
+        segs = [(p.part, 0)] + parse_segments(p.path)
         node = root
         for (tag, idx) in segs:
             node['children'].setdefault(tag, [])
@@ -267,10 +273,15 @@ def _calc_anchor(node, in_tbl=False):
         # 仅表格内的段落用文本做锚点；正文段落不锚定文本，避免文字改动破坏对齐
         node['anchor'] = (''.join(p.value for p in node['attrs'] if p.attr == '#ctext')
                           if in_tbl else '')
-    elif tag in ('tc', 'tr'):
+    elif tag in ('tc', 'tr', 'row'):
+        # 表格行/单元格、xlsx 行：聚合子节点锚点（行按自身内容文本区分）
         node['anchor'] = ''.join(c.get('anchor', '')
                                for _, kids in node['children'].items()
                                for c in kids)
+    elif tag == 'c':
+        # xlsx 单元格：取自身 #ctext 作为锚点（不参与格式比较，仅用于对齐）
+        node['anchor'] = ''.join(p.value for p in node['attrs']
+                                 if p.attr == '#ctext')
     else:
         node['anchor'] = ''
 
